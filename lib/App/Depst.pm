@@ -9,7 +9,7 @@ use File::Find 'find';
 use File::Path qw( mkpath rmtree );
 use IPC::Run 'run';
 
-our $VERSION = '1.01';
+our $VERSION = '1.02';
 
 sub init {
     die "Project already initialized\n" if ( -d '.depst' );
@@ -53,8 +53,26 @@ sub make {
 
 sub list {
     my ( $self, $path ) = @_;
-    die "No name specified; usage: depst list [path]\n" unless ($path);
-    print join( ' ', map { "$path/$_" } qw( deploy verify revert ) ), "\n";
+
+    if ($path) {
+        print join( ' ', map { "$path/$_" } qw( deploy verify revert ) ), "\n";
+    }
+    else {
+        for my $path ( $self->_watches() ) {
+            print $path, "\n";
+
+            find( {
+                follow   => 1,
+                no_chdir => 1,
+                wanted   => sub {
+                    return unless ( m|/deploy$| );
+                    ( my $action = $_ ) =~ s|/deploy$||;
+                    print '  ', $action, "\n";
+                },
+            }, $path );
+        }
+    }
+
     return 0;
 }
 
@@ -134,13 +152,18 @@ sub verify {
 }
 
 sub deploy {
-    my ( $self, $name ) = @_;
+    my ( $self, $name, $redeploy ) = @_;
     die "File to deploy required; usage: depst deploy file\n" unless ($name);
     die "Not in project root directory or project not initialized\n" unless ( -d '.depst' );
-    my $rv = $self->_action( $name, 'deploy' );
+    my $rv = $self->_action( $name, 'deploy', $redeploy );
     $self->verify($name);
     dircopy( $name, ".depst/$name" );
     return $rv;
+}
+
+sub redeploy {
+    my ( $self, $name ) = @_;
+    return $self->deploy( $name, 'redeploy' );
 }
 
 sub revert {
@@ -168,7 +191,10 @@ sub clean {
 sub preinstall {
     my ($self) = @_;
     die "Not in project root directory or project not initialized\n" unless ( -d '.depst' );
-    rmtree(".depst/$_") for ( $self->_watches() );
+    for ( $self->_watches() ) {
+        rmtree(".depst/$_");
+        mkdir(".depst/$_");
+    }
     return 0;
 }
 
@@ -178,11 +204,14 @@ sub _watches {
 }
 
 sub _action {
-    my ( $self, $path, $type ) = @_;
+    my ( $self, $path, $type, $redeploy ) = @_;
 
     if ($path) {
-        die "File not found: $path/$type\n" unless ( -f "$path/$type" );
-        $self->_execute("$path/$type");
+        unless ( -f "$path/$type" ) {
+            my $this_file = substr( $path, 7 );
+            die "Unable to $type $this_file (perhaps action has already occured)\n";
+        }
+        $self->_execute( "$path/$type", $redeploy ) or die "Failed to $type $path\n";
     }
     else {
         find( {
@@ -190,7 +219,7 @@ sub _action {
             no_chdir => 1,
             wanted   => sub {
                 return unless ( /\/$type$/ );
-                $self->_execute($_);
+                $self->_execute($_) or die "Failed to $type $_\n";
             },
         }, $self->_watches() );
     }
@@ -201,13 +230,20 @@ sub _action {
 {
     my %seen_files;
     sub _execute {
-        my ( $self, $file ) = @_;
+        my ( $self, $file, $quiet_verify_or_redeploy ) = @_;
         return if ( $seen_files{$file}++ );
 
         my @nodes = split( '/', $file );
         my $type = pop @nodes;
+        ( my $action = join( '/', @nodes ) ) =~ s|^\.depst/||;
+
+        return if (
+            ( $type eq 'deploy' and not $quiet_verify_or_redeploy and -f '.depst/' . $file ) or
+            ( $type eq 'revert' and not -f $file )
+        );
 
         open( my $content, '<', $file ) or die "Unable to read $file\n";
+
         $self->_execute("$_/$type") for (
             grep { defined }
             map { /depst\.prereq\b[\s:=-]+(.+?)\s*$/; $1 || undef }
@@ -234,15 +270,19 @@ sub _action {
             ) or die "Failed to execute $file\n";
 
             chomp($out);
-            die "$err\n" if ($err);
+            return ($err) ? 0 : $out if ($quiet_verify_or_redeploy);
 
-            print '', ( ($out) ? 'ok' : 'not ok' ) . " - verify: $file\n";
+            die "$err\n" if ($err);
+            print '', ( ($out) ? 'ok' : 'not ok' ) . " - verify: $action\n";
         }
         else {
+            print "begin - $type: $action\n";
             run( [ grep { defined } ( ($wrap) ? $wrap : undef ), $file ] ) or die "Failed to execute $file\n";
             $file =~ s|^\.depst/||;
-            print "ok - $type: $file\n";
+            print "ok - $type: $action\n";
         }
+
+        return 1;
     }
 }
 
@@ -261,12 +301,13 @@ depst COMMAND [DIR || NAME]
     depst init            # initialize depst for a project
     depst add DIR         # add a directory to depst tracking list
     depst make NAME       # create a named template set (set of 3 files)
-    depst list NAME       # dump a list of the template set (set of 3 files)
+    depst list [NAME]     # dump a list of the template set (set of 3 files)
     depst status [DIR]    # check status of all tracked or specific directory
     depst clean           # reset depst state to match current files/directories
     depst preinstall      # set depst state so an "update" will deploy everything
 
     depst deploy NAME     # deployment of a specific action
+    depst redeploy NAME   # deployment of a specific action
     depst verify [NAME]   # verification of tracked actions or specific action
     depst revert NAME     # revertion of a specific action
     depst update          # automaticall deploy or revert to cause currency
@@ -338,12 +379,15 @@ So if you want, you can do something like this:
 
     vi `depst make db/schema`
 
-=head2 list NAME
+=head2 list [NAME]
 
-Just does the last step of C<make>. It lists out the relative paths of the 3
-files, so you can do stuff like:
+If provided a name of an action, it does the last step of C<make>. It lists
+out the relative paths of the 3 files, so you can do stuff like:
 
     vi `depst list db/schema`
+
+If not provided a name of an action, it will list all tracked directories and
+every action within each directory.
 
 =head2 status [DIR]
 
@@ -351,10 +395,11 @@ This command will tell you your current state compared to what the current code
 says your state should be. For example, if you called status with no optional
 directory parameter, you might see something like this:
 
-    db
-     + db/new_function
-     - db/lolcats
-     M db/schema/deploy
+    diff - db
+      + db/new_function
+      - db/lolcats
+      M db/schema/deploy
+    ok - etc
 
 depst will report for each tracked directory what are new changes that haven't
 yet been deployed (marked with a "+"), features that have been deployed in your
@@ -400,6 +445,12 @@ want to:
 
 Note that you shouldn't add "/deploy" to the end of that. Also note that a
 C<deploy> call will automatically call C<verify> when complete.
+
+=head2 redeploy NAME
+
+This is exactly the same as deploy, except that if you've already deployed an
+action, "redeploy" will let you deploy the action again, whereas "deploy"
+shouldn't.
 
 =head2 verify [NAME]
 

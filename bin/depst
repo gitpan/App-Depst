@@ -5,7 +5,7 @@ use warnings;
 use Pod::Usage 'pod2usage';
 use App::Depst;
 
-my @commands = qw( init add make list status clean deploy verify revert update man );
+my @commands = qw( init add make list status clean preinstall deploy redeploy verify revert update man );
 
 my ( $command, @args ) = @ARGV;
 $command = lc( $command || 'undef' );
@@ -32,12 +32,13 @@ depst COMMAND [DIR || NAME]
     depst init            # initialize depst for a project
     depst add DIR         # add a directory to depst tracking list
     depst make NAME       # create a named template set (set of 3 files)
-    depst list NAME       # dump a list of the template set (set of 3 files)
+    depst list [NAME]     # dump a list of the template set (set of 3 files)
     depst status [DIR]    # check status of all tracked or specific directory
     depst clean           # reset depst state to match current files/directories
     depst preinstall      # set depst state so an "update" will deploy everything
 
     depst deploy NAME     # deployment of a specific action
+    depst redeploy NAME   # deployment of a specific action
     depst verify [NAME]   # verification of tracked actions or specific action
     depst revert NAME     # revertion of a specific action
     depst update          # automaticall deploy or revert to cause currency
@@ -109,12 +110,15 @@ So if you want, you can do something like this:
 
     vi `depst make db/schema`
 
-=head2 list NAME
+=head2 list [NAME]
 
-Just does the last step of C<make>. It lists out the relative paths of the 3
-files, so you can do stuff like:
+If provided a name of an action, it does the last step of C<make>. It lists
+out the relative paths of the 3 files, so you can do stuff like:
 
     vi `depst list db/schema`
+
+If not provided a name of an action, it will list all tracked directories and
+every action within each directory.
 
 =head2 status [DIR]
 
@@ -122,10 +126,11 @@ This command will tell you your current state compared to what the current code
 says your state should be. For example, if you called status with no optional
 directory parameter, you might see something like this:
 
-    db
-     + db/new_function
-     - db/lolcats
-     M db/schema/deploy
+    diff - db
+      + db/new_function
+      - db/lolcats
+      M db/schema/deploy
+    ok - etc
 
 depst will report for each tracked directory what are new changes that haven't
 yet been deployed (marked with a "+"), features that have been deployed in your
@@ -171,6 +176,12 @@ want to:
 
 Note that you shouldn't add "/deploy" to the end of that. Also note that a
 C<deploy> call will automatically call C<verify> when complete.
+
+=head2 redeploy NAME
+
+This is exactly the same as deploy, except that if you've already deployed an
+action, "redeploy" will let you deploy the action again, whereas "deploy"
+shouldn't.
 
 =head2 verify [NAME]
 
